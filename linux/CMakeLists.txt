@@ -68,6 +68,9 @@ set_target_properties(${PLUGIN_NAME} PROPERTIES
   CXX_VISIBILITY_PRESET hidden
   CXX_STANDARD 17
 )
+# Prevent symbols from static libraries (e.g. SDL3) leaking through the
+# plugin shared library, which would collide with system libraries at runtime.
+target_link_options(${PLUGIN_NAME} PRIVATE "-Wl,--exclude-libs,ALL")
 target_compile_definitions(${PLUGIN_NAME} PRIVATE FLUTTER_PLUGIN_IMPL)
 
 # Source include directories and library dependencies.
