@@ -70,6 +70,11 @@ set_target_properties(${BINARY_NAME}
 )
 
 
+# Uncomment the following line to build SDL3 from source instead of requiring
+# a system-installed SDL3. Useful when SDL3 is not available via your package
+# manager.
+#set(BUNDLE_SDL3 ON CACHE BOOL "" FORCE)
+
 # Generated plugin build rules, which manage building the plugins and adding
 # them to the application.
 include(flutter/generated_plugins.cmake)
