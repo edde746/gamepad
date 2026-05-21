@@ -40,6 +40,7 @@ class GamepadPlugin : FlutterPlugin, ActivityAware, MethodChannel.MethodCallHand
     /** The original Window.Callback we replaced, for restoration on detach. */
     private var originalWindowCallback: Window.Callback? = null
     private var attachedWindow: Window? = null
+    private var inputPaused = false
 
     // -- FlutterPlugin ---------------------------------------------------------
 
@@ -76,6 +77,17 @@ class GamepadPlugin : FlutterPlugin, ActivityAware, MethodChannel.MethodCallHand
             }
             "dispose" -> {
                 inputManager?.stop()
+                detachInputListeners()
+                result.success(null)
+            }
+            "pause" -> {
+                inputPaused = true
+                detachInputListeners()
+                result.success(null)
+            }
+            "resume" -> {
+                inputPaused = false
+                activityBinding?.activity?.let { attachInputListeners(it) }
                 result.success(null)
             }
             else -> result.notImplemented()
@@ -86,7 +98,9 @@ class GamepadPlugin : FlutterPlugin, ActivityAware, MethodChannel.MethodCallHand
 
     override fun onAttachedToActivity(binding: ActivityPluginBinding) {
         activityBinding = binding
-        attachInputListeners(binding.activity)
+        if (!inputPaused) {
+            attachInputListeners(binding.activity)
+        }
     }
 
     override fun onDetachedFromActivityForConfigChanges() {
@@ -96,7 +110,9 @@ class GamepadPlugin : FlutterPlugin, ActivityAware, MethodChannel.MethodCallHand
 
     override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
         activityBinding = binding
-        attachInputListeners(binding.activity)
+        if (!inputPaused) {
+            attachInputListeners(binding.activity)
+        }
     }
 
     override fun onDetachedFromActivity() {
@@ -116,6 +132,10 @@ class GamepadPlugin : FlutterPlugin, ActivityAware, MethodChannel.MethodCallHand
     private fun attachInputListeners(activity: Activity) {
         val window = activity.window ?: return
         val view = window.decorView
+        if (attachedWindow == window && attachedView == view && window.callback is GamepadWindowCallback) {
+            return
+        }
+        detachInputListeners()
 
         attachedView = view
         attachedWindow = window
@@ -155,6 +175,7 @@ class GamepadPlugin : FlutterPlugin, ActivityAware, MethodChannel.MethodCallHand
     private fun tearDown() {
         inputManager?.stop()
         inputManager = null
+        inputPaused = false
 
         detachInputListeners()
 

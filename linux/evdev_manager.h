@@ -4,6 +4,7 @@
 #include <flutter_linux/flutter_linux.h>
 #include <libevdev/libevdev.h>
 #include <linux/input.h>
+#include <sys/stat.h>
 
 #include <cstdint>
 #include <functional>
@@ -46,6 +47,9 @@ class EvdevManager {
     std::string name;
     uint16_t vendor_id;
     uint16_t product_id;
+    dev_t node_dev;
+    ino_t node_ino;
+    dev_t rdev;
     struct input_absinfo abs_info[ABS_MAX];
     GSource* io_source;
     // Last emitted axis values for throttling (indexed by W3C axis).
@@ -55,11 +59,14 @@ class EvdevManager {
   };
 
   static int64_t NowMillis();
+  static bool IsSameDeviceNode(const DeviceInfo& info, const struct stat& statbuf);
   bool IsGamepad(struct libevdev* dev);
   void ScanDevices();
-  void AddDevice(const char* path);
+  bool AddDevice(const char* path);
   void RemoveDevice(const char* path);
-  void OnInput(DeviceInfo& info);
+  void ScheduleRemoveDevice(const std::string& path, bool rescan_after_removal = true);
+  void ScheduleScanRetry(int attempts);
+  void OnInput(DeviceInfo& info, const std::string& path);
 
   /// Queue an event for delivery on the next timer tick.
   void ForwardEvent(FlValue* event);
@@ -80,6 +87,8 @@ class EvdevManager {
   gulong dir_monitor_signal_id_ = 0;
   std::unordered_map<std::string, DeviceInfo> devices_;
   int next_id_ = 0;
+  GSource* scan_retry_source_ = nullptr;
+  int scan_retry_attempts_left_ = 0;
 
   // Shared state — protected by mutex_.
   std::mutex mutex_;

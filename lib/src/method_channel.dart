@@ -39,13 +39,13 @@ class MethodChannelGamepad extends GamepadPlatform {
 
   @override
   Future<void> pause() async {
-    if (!Platform.isWindows) return;
+    if (!Platform.isAndroid && !Platform.isWindows) return;
     await _methodChannel.invokeMethod<void>('pause');
   }
 
   @override
   Future<void> resume() async {
-    if (!Platform.isWindows) return;
+    if (!Platform.isAndroid && !Platform.isWindows) return;
     await _methodChannel.invokeMethod<void>('resume');
   }
 }

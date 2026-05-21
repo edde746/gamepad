@@ -2,6 +2,7 @@
 
 #include "button_mapping.h"
 
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -9,6 +10,17 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <unordered_set>
+#include <vector>
+
+namespace {
+constexpr guint kHotplugRetryDelayMs = 50;
+constexpr int kHotplugRetryAttempts = 8;
+
+bool IsEventNodeName(const char* name) {
+  return name && strncmp(name, "event", 5) == 0;
+}
+
+}  // namespace
 
 EvdevManager::EvdevManager() = default;
 
@@ -83,6 +95,13 @@ void EvdevManager::Stop() {
     g_file_monitor_cancel(dir_monitor_);
     g_object_unref(dir_monitor_);
     dir_monitor_ = nullptr;
+  }
+
+  if (scan_retry_source_) {
+    g_source_destroy(scan_retry_source_);
+    g_source_unref(scan_retry_source_);
+    scan_retry_source_ = nullptr;
+    scan_retry_attempts_left_ = 0;
   }
 
   for (auto& [path, info] : devices_) {
@@ -255,39 +274,80 @@ bool EvdevManager::IsGamepad(struct libevdev* dev) {
   return has_buttons || has_axes;
 }
 
+bool EvdevManager::IsSameDeviceNode(const DeviceInfo& info, const struct stat& statbuf) {
+  return info.node_dev == statbuf.st_dev &&
+         info.node_ino == statbuf.st_ino &&
+         info.rdev == statbuf.st_rdev;
+}
+
 void EvdevManager::ScanDevices() {
   DIR* dir = opendir("/dev/input");
   if (!dir) return;
 
+  std::unordered_set<std::string> seen_paths;
   struct dirent* entry;
   while ((entry = readdir(dir)) != nullptr) {
-    if (strncmp(entry->d_name, "event", 5) != 0) continue;
+    if (!IsEventNodeName(entry->d_name)) continue;
     std::string path = std::string("/dev/input/") + entry->d_name;
+    seen_paths.insert(path);
     AddDevice(path.c_str());
   }
   closedir(dir);
-}
 
-void EvdevManager::AddDevice(const char* path) {
+  std::vector<std::string> stale_paths;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (devices_.count(path)) return;
+    for (const auto& [path, info] : devices_) {
+      if (seen_paths.find(path) == seen_paths.end()) {
+        stale_paths.push_back(path);
+      }
+    }
   }
 
+  for (const auto& path : stale_paths) {
+    RemoveDevice(path.c_str());
+  }
+}
+
+bool EvdevManager::AddDevice(const char* path) {
+  std::string path_str(path);
+
   int fd = open(path, O_RDONLY | O_NONBLOCK);
-  if (fd < 0) return;
+  if (fd < 0) {
+    g_debug("evdev: failed to open %s: %s", path, g_strerror(errno));
+    return false;
+  }
+
+  struct stat statbuf;
+  if (fstat(fd, &statbuf) < 0) {
+    g_debug("evdev: failed to stat %s: %s", path, g_strerror(errno));
+    close(fd);
+    return false;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = devices_.find(path_str);
+    if (it != devices_.end() && IsSameDeviceNode(it->second, statbuf)) {
+      close(fd);
+      return true;
+    }
+  }
+
+  RemoveDevice(path);
 
   struct libevdev* dev = nullptr;
   int rc = libevdev_new_from_fd(fd, &dev);
   if (rc < 0) {
+    g_debug("evdev: failed to initialize %s: %s", path, g_strerror(-rc));
     close(fd);
-    return;
+    return false;
   }
 
   if (!IsGamepad(dev)) {
     libevdev_free(dev);
     close(fd);
-    return;
+    return true;
   }
 
   DeviceInfo info{};
@@ -299,6 +359,9 @@ void EvdevManager::AddDevice(const char* path) {
   info.name = name ? name : "Unknown Gamepad";
   info.vendor_id = static_cast<uint16_t>(libevdev_get_id_vendor(dev));
   info.product_id = static_cast<uint16_t>(libevdev_get_id_product(dev));
+  info.node_dev = statbuf.st_dev;
+  info.node_ino = statbuf.st_ino;
+  info.rdev = statbuf.st_rdev;
 
   // Initialize last-emitted values to NaN so the first event always fires.
   for (int i = 0; i < 4; ++i) info.last_axis[i] = NAN;
@@ -316,7 +379,6 @@ void EvdevManager::AddDevice(const char* path) {
 
   // Attach an IO source to the worker context.
   GIOChannel* channel = g_io_channel_unix_new(fd);
-  std::string path_str(path);
 
   GSource* source = g_io_create_watch(
       channel, static_cast<GIOCondition>(G_IO_IN | G_IO_HUP | G_IO_ERR));
@@ -344,29 +406,11 @@ void EvdevManager::AddDevice(const char* path) {
             if (it == self->devices_.end()) return G_SOURCE_REMOVE;
 
             if (condition & (G_IO_HUP | G_IO_ERR)) {
-              auto* path_copy = new std::string(wd->path);
-              auto* mgr = self;
-              // Schedule removal as idle on worker context.
-              GSource* idle = g_idle_source_new();
-              g_source_set_callback(
-                  idle,
-                  [](gpointer data) -> gboolean {
-                    auto* args =
-                        static_cast<std::pair<EvdevManager*, std::string*>*>(
-                            data);
-                    args->first->RemoveDevice(args->second->c_str());
-                    delete args->second;
-                    delete args;
-                    return G_SOURCE_REMOVE;
-                  },
-                  new std::pair<EvdevManager*, std::string*>(mgr, path_copy),
-                  nullptr);
-              g_source_attach(idle, self->worker_context_);
-              g_source_unref(idle);
+              self->ScheduleRemoveDevice(wd->path);
               return G_SOURCE_REMOVE;
             }
 
-            self->OnInput(it->second);
+            self->OnInput(it->second, wd->path);
             return G_SOURCE_CONTINUE;
           })),
       wd,
@@ -394,6 +438,7 @@ void EvdevManager::AddDevice(const char* path) {
 
   ForwardEvent(event);
   fl_value_unref(event);
+  return true;
 }
 
 void EvdevManager::RemoveDevice(const char* path) {
@@ -428,11 +473,70 @@ void EvdevManager::RemoveDevice(const char* path) {
   fl_value_unref(event);
 }
 
+void EvdevManager::ScheduleRemoveDevice(const std::string& path, bool rescan_after_removal) {
+  if (!worker_context_) {
+    RemoveDevice(path.c_str());
+    return;
+  }
+
+  struct RemoveData {
+    EvdevManager* self;
+    std::string path;
+    bool rescan_after_removal;
+  };
+
+  GSource* idle = g_idle_source_new();
+  g_source_set_callback(
+      idle,
+      [](gpointer data) -> gboolean {
+        auto* remove_data = static_cast<RemoveData*>(data);
+        remove_data->self->RemoveDevice(remove_data->path.c_str());
+        if (remove_data->rescan_after_removal) {
+          remove_data->self->ScheduleScanRetry(kHotplugRetryAttempts);
+        }
+        delete remove_data;
+        return G_SOURCE_REMOVE;
+      },
+      new RemoveData{this, path, rescan_after_removal}, nullptr);
+  g_source_attach(idle, worker_context_);
+  g_source_unref(idle);
+}
+
+void EvdevManager::ScheduleScanRetry(int attempts) {
+  if (!worker_context_) return;
+  if (scan_retry_attempts_left_ < attempts) {
+    scan_retry_attempts_left_ = attempts;
+  }
+  if (scan_retry_source_) return;
+
+  scan_retry_source_ = g_timeout_source_new(kHotplugRetryDelayMs);
+  g_source_set_callback(
+      scan_retry_source_,
+      [](gpointer data) -> gboolean {
+        auto* self = static_cast<EvdevManager*>(data);
+        self->ScanDevices();
+
+        if (--self->scan_retry_attempts_left_ <= 0) {
+          GSource* source = self->scan_retry_source_;
+          self->scan_retry_source_ = nullptr;
+          self->scan_retry_attempts_left_ = 0;
+          if (source) {
+            g_source_unref(source);
+          }
+          return G_SOURCE_REMOVE;
+        }
+
+        return G_SOURCE_CONTINUE;
+      },
+      this, nullptr);
+  g_source_attach(scan_retry_source_, worker_context_);
+}
+
 // ---------------------------------------------------------------------------
 // Event reading (runs on worker thread, mutex held by caller)
 // ---------------------------------------------------------------------------
 
-void EvdevManager::OnInput(DeviceInfo& info) {
+void EvdevManager::OnInput(DeviceInfo& info, const std::string& path) {
   struct input_event ev;
   int rc;
 
@@ -583,6 +687,11 @@ void EvdevManager::OnInput(DeviceInfo& info) {
       // Drain sync events.
     }
   }
+
+  if (rc == -ENODEV || rc == -EIO) {
+    g_debug("evdev: removing unavailable gamepad %s: %s", path.c_str(), g_strerror(-rc));
+    ScheduleRemoveDevice(path);
+  }
 }
 
 void EvdevManager::OnDirectoryChanged(GFileMonitor* monitor, GFile* file,
@@ -591,15 +700,21 @@ void EvdevManager::OnDirectoryChanged(GFileMonitor* monitor, GFile* file,
                                        gpointer user_data) {
   auto* self = static_cast<EvdevManager*>(user_data);
 
+  g_autofree gchar* basename = g_file_get_basename(file);
+  if (!IsEventNodeName(basename)) return;
+
   g_autofree gchar* path = g_file_get_path(file);
   if (!path) return;
 
-  g_autofree gchar* basename = g_file_get_basename(file);
-  if (!basename || strncmp(basename, "event", 5) != 0) return;
-
-  if (event_type == G_FILE_MONITOR_EVENT_CREATED) {
-    self->AddDevice(path);
-  } else if (event_type == G_FILE_MONITOR_EVENT_DELETED) {
+  if (event_type == G_FILE_MONITOR_EVENT_CREATED ||
+      event_type == G_FILE_MONITOR_EVENT_ATTRIBUTE_CHANGED ||
+      event_type == G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT) {
+    if (!self->AddDevice(path)) {
+      self->ScheduleScanRetry(kHotplugRetryAttempts);
+    }
+  } else if (event_type == G_FILE_MONITOR_EVENT_DELETED ||
+             event_type == G_FILE_MONITOR_EVENT_UNMOUNTED) {
     self->RemoveDevice(path);
+    self->ScheduleScanRetry(kHotplugRetryAttempts);
   }
 }
