@@ -44,19 +44,34 @@ class GamepadStreamHandler: NSObject, FlutterStreamHandler {
 
     /// Sends a gamepad event array to Dart.
     ///
-    /// If the sink is not yet available the event is queued.
+    /// If the sink is not yet available the event is queued. Events are
+    /// delivered on the main thread; when already on it (the usual case,
+    /// since GameController handlers default to the main queue) the event is
+    /// sent synchronously to avoid an extra runloop hop.
     func send(event: [Any]) {
         lock.lock()
-        if let sink = eventSink {
-            lock.unlock()
-            // Dispatch on the main thread to satisfy Flutter platform channel
-            // requirements.
-            DispatchQueue.main.async {
-                sink(event)
-            }
-        } else {
+        if eventSink == nil {
             pendingEvents.append(event)
             lock.unlock()
+            return
         }
+        lock.unlock()
+
+        if Thread.isMainThread {
+            deliver(event)
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.deliver(event)
+            }
+        }
+    }
+
+    /// Re-reads the sink at delivery time so events never hit a sink that
+    /// was cancelled between enqueue and dispatch.
+    private func deliver(_ event: [Any]) {
+        lock.lock()
+        let sink = eventSink
+        lock.unlock()
+        sink?(event)
     }
 }

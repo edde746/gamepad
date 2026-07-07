@@ -19,7 +19,7 @@ all six Flutter platforms.
 
 ```yaml
 dependencies:
-  universal_gamepad: ^1.4.0
+  universal_gamepad: ^1.5.8
 ```
 
 ## Linux
@@ -83,6 +83,8 @@ Gamepad.instance.axisEvents.listen((e) { ... });
 | `axisEvents`       | `Stream<GamepadAxisEvent>`          | Axis value changes only              |
 | `listGamepads()`   | `Future<List<GamepadInfo>>`         | Currently connected gamepads         |
 | `dispose()`        | `Future<void>`                      | Release native resources             |
+| `pause()`          | `Future<void>`                      | Release device handles / input listeners (Android & Windows; no-op elsewhere) |
+| `resume()`         | `Future<void>`                      | Re-acquire gamepads after `pause()`  |
 
 ### Event types
 
@@ -122,6 +124,24 @@ Gamepad.instance.axisEvents.listen((e) { ... });
 | 1     | `leftStickY`   | -1.0 (up) to 1.0 (down)     |
 | 2     | `rightStickX`  | -1.0 (left) to 1.0 (right)  |
 | 3     | `rightStickY`  | -1.0 (up) to 1.0 (down)     |
+
+## Platform notes
+
+- **tvOS**: the Siri Remote only exposes Apple's `microGamepad` profile, which
+  this plugin does not map. It will emit a connect event but produce no
+  button/axis input; only controllers with an `extendedGamepad` profile
+  (e.g. Xbox/PlayStation controllers) deliver input.
+- **Linux**: face buttons are mapped per the Linux gamepad spec (by physical
+  location). The `xpad` driver (Xbox controllers) reports X/Y by label
+  instead; the plugin detects `xpad` via sysfs (with a Microsoft vendor-ID
+  fallback) and corrects the mapping. Exotic pads with non-conforming drivers
+  may still report X/Y swapped.
+- **Web**: state is polled via `requestAnimationFrame`, so input stops while
+  the tab is hidden. Browsers may not expose a gamepad until a button is
+  pressed. Controllers whose `Gamepad.mapping` is not `"standard"` are still
+  mapped positionally and may report wrong button/axis identities.
+- **Timestamps** are wall-clock milliseconds since the Unix epoch on all
+  platforms.
 
 ## Example
 

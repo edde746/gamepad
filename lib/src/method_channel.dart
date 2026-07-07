@@ -1,6 +1,6 @@
 import 'dart:async';
-import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'platform_interface.dart';
@@ -37,15 +37,20 @@ class MethodChannelGamepad extends GamepadPlatform {
     _events = null;
   }
 
+  /// Whether the native side implements the `pause`/`resume` methods.
+  bool get _supportsPauseResume =>
+      defaultTargetPlatform == TargetPlatform.android ||
+      defaultTargetPlatform == TargetPlatform.windows;
+
   @override
   Future<void> pause() async {
-    if (!Platform.isAndroid && !Platform.isWindows) return;
+    if (!_supportsPauseResume) return;
     await _methodChannel.invokeMethod<void>('pause');
   }
 
   @override
   Future<void> resume() async {
-    if (!Platform.isAndroid && !Platform.isWindows) return;
+    if (!_supportsPauseResume) return;
     await _methodChannel.invokeMethod<void>('resume');
   }
 }

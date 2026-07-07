@@ -72,6 +72,11 @@ class SdlManager {
   /// Processes all pending SDL events.
   void PollEvents();
 
+  /// Enumerates currently attached gamepads and registers any that are not
+  /// yet tracked. Needed after Resume(): SDL does not re-emit ADDED events
+  /// for devices that stayed attached while our handles were closed.
+  void RescanGamepads();
+
   /// Handles a gamepad added event.
   void HandleGamepadAdded(SDL_JoystickID joystick_id);
 

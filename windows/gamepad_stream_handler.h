@@ -29,14 +29,18 @@ class GamepadStreamHandler
   ~GamepadStreamHandler() override;
 
   /// Sends a gamepad event to the Dart side. Thread-safe.
-  /// The event should be a flutter::EncodableMap.
+  /// The event is a compact positional flutter::EncodableList
+  /// (element 0 = type tag; see the Dart GamepadEvent.fromList decoder).
   void SendEvent(const flutter::EncodableValue& event);
 
   /// Flushes queued events on the platform thread.
   void FlushQueuedEvents();
 
-  /// Callback used to wake platform thread to flush queued events.
-  void SetWakeCallback(std::function<void()> callback);
+  /// Callback used to wake the platform thread to flush queued events.
+  /// Must return true only if the wake was actually delivered (e.g. the
+  /// flush message was posted); on false the flush latch is cleared so a
+  /// later event can retry.
+  void SetWakeCallback(std::function<bool()> callback);
 
   /// Returns true if a Dart listener is currently attached.
   bool HasListener() const;
@@ -57,7 +61,7 @@ class GamepadStreamHandler
   mutable std::mutex sink_mutex_;
   std::unique_ptr<flutter::EventSink<flutter::EncodableValue>> event_sink_;
   std::deque<flutter::EncodableValue> pending_events_;
-  std::function<void()> wake_callback_;
+  std::function<bool()> wake_callback_;
   std::atomic<bool> flush_posted_{false};
 };
 

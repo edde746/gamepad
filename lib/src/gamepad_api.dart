@@ -34,11 +34,12 @@ class Gamepad {
   /// should not be used until a new stream is requested.
   Future<void> dispose() => GamepadPlatform.instance.dispose();
 
-  /// Pauses native gamepad polling, releasing device handles so other
-  /// apps can use gamepads. Only has effect on Windows.
+  /// Pauses native gamepad input, releasing device handles / input listeners
+  /// so other apps can use gamepads. Only has effect on Android and Windows;
+  /// a no-op elsewhere.
   Future<void> pause() => GamepadPlatform.instance.pause();
 
-  /// Resumes native gamepad polling after a [pause]. Connected gamepads
+  /// Resumes native gamepad input after a [pause]. Connected gamepads
   /// will be re-detected and emit connection events.
   Future<void> resume() => GamepadPlatform.instance.resume();
 }

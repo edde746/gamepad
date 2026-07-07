@@ -20,8 +20,9 @@ class GamepadStreamHandler {
   /// must outlive this handler.
   void SetChannel(FlEventChannel* channel);
 
-  /// Sends an event (FlValue map) to the Dart side. No-op if nobody is
-  /// listening. The caller retains ownership of |event|.
+  /// Sends an event (compact positional FlValue list; element 0 = type tag)
+  /// to the Dart side. No-op if nobody is listening. The caller retains
+  /// ownership of |event|.
   void SendEvent(FlValue* event);
 
   /// Returns true if a Dart listener is currently active.

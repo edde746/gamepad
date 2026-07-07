@@ -98,6 +98,13 @@ void SdlManager::PollLoop() {
       }
       // Drain again after wake
       while (SDL_PollEvent(&discard)) {}
+      // Closing our handles doesn't make SDL re-emit ADDED events for
+      // devices that stayed attached, so re-enumerate to re-open and
+      // re-announce them (also covers devices attached while paused,
+      // whose ADDED events were just drained).
+      if (running_.load() && !paused_.load()) {
+        RescanGamepads();
+      }
       continue;
     }
     PollEvents();
@@ -134,6 +141,23 @@ void SdlManager::PollEvents() {
         break;
     }
   }
+}
+
+void SdlManager::RescanGamepads() {
+  int count = 0;
+  SDL_JoystickID* ids = SDL_GetGamepads(&count);
+  if (!ids) return;
+  for (int i = 0; i < count; i++) {
+    bool known;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      known = gamepads_.find(ids[i]) != gamepads_.end();
+    }
+    if (!known) {
+      HandleGamepadAdded(ids[i]);
+    }
+  }
+  SDL_free(ids);
 }
 
 void SdlManager::HandleGamepadAdded(SDL_JoystickID joystick_id) {
@@ -234,6 +258,9 @@ void SdlManager::HandleAxisEvent(SDL_JoystickID joystick_id, uint8_t axis,
   auto sdl_axis = static_cast<SDL_GamepadAxis>(axis);
 
   // Look up the device info so we can access last_axis/last_trigger.
+  // Holding this pointer after unlocking is safe only because gamepads_ is
+  // inserted/erased exclusively on this poll thread; other threads (e.g.
+  // ListGamepads) only read under the lock. Revisit if that ever changes.
   GamepadInfo* info_ptr = nullptr;
   {
     std::lock_guard<std::mutex> lock(state_mutex_);

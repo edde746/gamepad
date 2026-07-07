@@ -85,16 +85,12 @@ class GCControllerManager {
         for controller in GCController.controllers() {
             let key = ObjectIdentifier(controller)
             guard let gamepadId = controllerIds[key] else { continue }
-            var info: [String: Any] = [
+            // GCController exposes no numeric vendor/product IDs through the
+            // public API, so those keys are omitted (optional on the Dart side).
+            let info: [String: Any] = [
                 "id": gamepadId,
                 "name": controllerName(controller),
             ]
-            if let vendorId = vendorId(for: controller) {
-                info["vendorId"] = vendorId
-            }
-            if let productId = productId(for: controller) {
-                info["productId"] = productId
-            }
             results.append(info)
         }
         return results
@@ -114,14 +110,15 @@ class GCControllerManager {
         installValueChangedHandler(on: controller, gamepadId: gamepadId)
 
         // Wire format: [0, gamepadId, timestamp, connected, name, vendorId, productId]
+        // vendor/product IDs are not publicly exposed by GCController; send null.
         let event: [Any] = [
             0,
             gamepadId,
             currentTimestamp(),
             true,
             controllerName(controller),
-            vendorId(for: controller) as Any,
-            productId(for: controller) as Any,
+            NSNull(),
+            NSNull(),
         ]
         streamHandler.send(event: event)
     }
@@ -139,8 +136,8 @@ class GCControllerManager {
             currentTimestamp(),
             false,
             controllerName(controller),
-            vendorId(for: controller) as Any,
-            productId(for: controller) as Any,
+            NSNull(),
+            NSNull(),
         ]
         streamHandler.send(event: event)
     }
@@ -241,20 +238,5 @@ class GCControllerManager {
             return category
         }
         return "Unknown Controller"
-    }
-
-    /// Attempts to extract a USB vendor ID from the controller.
-    ///
-    /// The public `GCController` API does not expose vendor or product IDs
-    /// directly. Returns `nil`; the Dart side handles optional values gracefully.
-    private func vendorId(for controller: GCController) -> Int? {
-        return nil
-    }
-
-    /// Attempts to extract a USB product ID from the controller.
-    ///
-    /// See `vendorId(for:)` -- same limitation applies.
-    private func productId(for controller: GCController) -> Int? {
-        return nil
     }
 }

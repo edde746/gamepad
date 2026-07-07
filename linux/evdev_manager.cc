@@ -2,6 +2,7 @@
 
 #include "button_mapping.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -18,6 +19,28 @@ constexpr int kHotplugRetryAttempts = 8;
 
 bool IsEventNodeName(const char* name) {
   return name && strncmp(name, "event", 5) == 0;
+}
+
+// The xpad driver maps face buttons by label (physical X = BTN_X = BTN_NORTH,
+// physical Y = BTN_Y = BTN_WEST) instead of by location as the Linux gamepad
+// spec prescribes (and hid-playstation etc. follow). Detect it through the
+// sysfs driver symlink for the device node, falling back to the Microsoft
+// vendor ID when sysfs is unavailable.
+bool UsesLabelMappedFaceButtons(const char* dev_path, uint16_t vendor_id) {
+  const char* base = strrchr(dev_path, '/');
+  base = base ? base + 1 : dev_path;
+  std::string link =
+      std::string("/sys/class/input/") + base + "/device/device/driver";
+  char target[256];
+  ssize_t len = readlink(link.c_str(), target, sizeof(target) - 1);
+  if (len > 0) {
+    target[len] = '\0';
+    const char* driver = strrchr(target, '/');
+    driver = driver ? driver + 1 : target;
+    return strcmp(driver, "xpad") == 0;
+  }
+  constexpr uint16_t kVendorMicrosoft = 0x045e;
+  return vendor_id == kVendorMicrosoft;
 }
 
 }  // namespace
@@ -163,21 +186,58 @@ FlValue* EvdevManager::ListGamepads() {
 }
 
 void EvdevManager::EmitExistingDevices() {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (!callback_) return;
+  // Snapshot under the lock, emit after releasing it — callback_ re-enters
+  // Flutter engine code and must not run under mutex_.
+  struct Snapshot {
+    int id;
+    std::string name;
+    uint16_t vendor_id;
+    uint16_t product_id;
+  };
+  std::vector<Snapshot> snapshot;
+  EventCallback cb;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    cb = callback_;
+    if (!cb) return;
+    for (const auto& [path, info] : devices_) {
+      snapshot.push_back({info.id, info.name, info.vendor_id, info.product_id});
+    }
+  }
 
-  for (const auto& [path, info] : devices_) {
+  // Drop queued connect events: the snapshot below already announces every
+  // tracked device, so letting them drain afterwards would deliver duplicate
+  // connects to the fresh listener. (A connect queued between the snapshot
+  // and this purge can still slip through, but that window is microseconds
+  // around a hotplug racing the first listen.)
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    pending_events_.erase(
+        std::remove_if(pending_events_.begin(), pending_events_.end(),
+                       [](FlValue* ev) {
+                         bool is_connect =
+                             fl_value_get_length(ev) >= 4 &&
+                             fl_value_get_int(fl_value_get_list_value(ev, 0)) ==
+                                 0 &&
+                             fl_value_get_bool(fl_value_get_list_value(ev, 3));
+                         if (is_connect) fl_value_unref(ev);
+                         return is_connect;
+                       }),
+        pending_events_.end());
+  }
+
+  for (const auto& d : snapshot) {
     int64_t ts = NowMillis();
     // Wire format: [0, gamepadId, timestamp, connected, name, vendorId, productId]
     FlValue* event = fl_value_new_list();
     fl_value_append_take(event, fl_value_new_int(0));
-    fl_value_append_take(event, fl_value_new_int(info.id));
+    fl_value_append_take(event, fl_value_new_int(d.id));
     fl_value_append_take(event, fl_value_new_int(ts));
     fl_value_append_take(event, fl_value_new_bool(TRUE));
-    fl_value_append_take(event, fl_value_new_string(info.name.c_str()));
-    fl_value_append_take(event, fl_value_new_int(info.vendor_id));
-    fl_value_append_take(event, fl_value_new_int(info.product_id));
-    callback_(event);
+    fl_value_append_take(event, fl_value_new_string(d.name.c_str()));
+    fl_value_append_take(event, fl_value_new_int(d.vendor_id));
+    fl_value_append_take(event, fl_value_new_int(d.product_id));
+    cb(event);
     fl_value_unref(event);
   }
 }
@@ -359,6 +419,7 @@ bool EvdevManager::AddDevice(const char* path) {
   info.name = name ? name : "Unknown Gamepad";
   info.vendor_id = static_cast<uint16_t>(libevdev_get_id_vendor(dev));
   info.product_id = static_cast<uint16_t>(libevdev_get_id_product(dev));
+  info.swap_north_west = UsesLabelMappedFaceButtons(path, info.vendor_id);
   info.node_dev = statbuf.st_dev;
   info.node_ino = statbuf.st_ino;
   info.rdev = statbuf.st_rdev;
@@ -543,7 +604,8 @@ void EvdevManager::OnInput(DeviceInfo& info, const std::string& path) {
   while ((rc = libevdev_next_event(info.evdev, LIBEVDEV_READ_FLAG_NORMAL,
                                     &ev)) == LIBEVDEV_READ_STATUS_SUCCESS) {
     if (ev.type == EV_KEY) {
-      int w3c_index = ButtonMapping::EvdevButtonToW3C(ev.code);
+      int w3c_index =
+          ButtonMapping::EvdevButtonToW3C(ev.code, info.swap_north_west);
       if (w3c_index < 0) continue;
 
       bool pressed = ev.value != 0;

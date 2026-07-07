@@ -44,6 +44,9 @@ void GamepadPlugin::RegisterWithRegistrar(
                                           LPARAM lparam) {
             if (window_handle->load() == nullptr) {
               window_handle->store(hwnd);
+              // Events sent before the HWND was known couldn't be posted;
+              // flush them now that we're on the platform thread.
+              stream_handler->FlushQueuedEvents();
             }
             if (message == GamepadStreamHandler::kFlushMessage) {
               stream_handler->FlushQueuedEvents();
@@ -52,11 +55,12 @@ void GamepadPlugin::RegisterWithRegistrar(
             return std::optional<LRESULT>();
           });
 
-  stream_handler->SetWakeCallback([window_handle]() {
+  stream_handler->SetWakeCallback([window_handle]() -> bool {
     const HWND hwnd = window_handle->load();
-    if (hwnd != nullptr) {
-      ::PostMessage(hwnd, GamepadStreamHandler::kFlushMessage, 0, 0);
+    if (hwnd == nullptr) {
+      return false;
     }
+    return ::PostMessage(hwnd, GamepadStreamHandler::kFlushMessage, 0, 0) != 0;
   });
 
   // Create the plugin instance.

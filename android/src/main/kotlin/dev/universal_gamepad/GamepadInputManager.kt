@@ -30,10 +30,24 @@ class GamepadInputManager(
     private val trackedDevices = mutableSetOf<Int>()
 
     /**
+     * Device info captured at track time, keyed by deviceId, so disconnect
+     * events can still report name/vendorId/productId after the InputDevice
+     * is gone.
+     */
+    private data class DeviceInfo(val name: String, val vendorId: Int, val productId: Int)
+    private val deviceInfoCache = mutableMapOf<Int, DeviceInfo>()
+
+    /**
      * Previous axis values keyed by "(deviceId)_(axisConstant)".
      * Used to filter out duplicate / jitter axis events.
      */
     private val previousAxisValues = mutableMapOf<String, Float>()
+
+    /**
+     * Per-device flat (deadzone) values reported by the device's MotionRange,
+     * keyed by "(deviceId)_(axisConstant)".
+     */
+    private val axisFlats = mutableMapOf<String, Float>()
 
     /**
      * Previous D-pad hat state keyed by deviceId.
@@ -45,6 +59,9 @@ class GamepadInputManager(
 
     /** Threshold below which axis value changes are ignored. */
     private val AXIS_THRESHOLD = 0.01f
+
+    /** Analog trigger value above which the trigger counts as pressed. */
+    private val TRIGGER_PRESS_THRESHOLD = 0.5f
 
     // -- Lifecycle -------------------------------------------------------------
 
@@ -63,7 +80,9 @@ class GamepadInputManager(
     fun stop() {
         inputManager.unregisterInputDeviceListener(this)
         trackedDevices.clear()
+        deviceInfoCache.clear()
         previousAxisValues.clear()
+        axisFlats.clear()
         previousHatX.clear()
         previousHatY.clear()
     }
@@ -72,20 +91,19 @@ class GamepadInputManager(
 
     override fun onInputDeviceAdded(deviceId: Int) {
         val device = InputDevice.getDevice(deviceId) ?: return
-        if (!isGamepad(device)) return
-
-        if (trackedDevices.add(deviceId)) {
-            emitConnectionEvent(device, connected = true)
-        }
+        if (isGamepad(device)) track(device)
     }
 
     override fun onInputDeviceRemoved(deviceId: Int) {
         if (trackedDevices.remove(deviceId)) {
             emitDisconnectionEvent(deviceId)
-            // Clean up axis state for removed device.
+            // Clean up per-device state.
             previousAxisValues.keys
                 .filter { it.startsWith("${deviceId}_") }
                 .forEach { previousAxisValues.remove(it) }
+            axisFlats.keys
+                .filter { it.startsWith("${deviceId}_") }
+                .forEach { axisFlats.remove(it) }
             previousHatX.remove(deviceId)
             previousHatY.remove(deviceId)
         }
@@ -95,62 +113,30 @@ class GamepadInputManager(
         // A device was reconfigured. Treat it like a reconnect if it is
         // (or has become) a gamepad we were not yet tracking.
         val device = InputDevice.getDevice(deviceId) ?: return
-        if (isGamepad(device) && trackedDevices.add(deviceId)) {
-            emitConnectionEvent(device, connected = true)
-        }
+        if (isGamepad(device)) track(device)
     }
 
     // -- Public input handlers (called from plugin view listeners) --------------
 
     /**
      * Processes a generic motion event (joystick axes, triggers, D-pad hat).
+     * Processes batched historical samples before the current sample, per the
+     * Android game-controller guide.
      * Returns `true` if the event was handled.
      */
     fun onGenericMotionEvent(event: MotionEvent): Boolean {
-        if (event.source and (InputDevice.SOURCE_GAMEPAD or InputDevice.SOURCE_JOYSTICK) == 0) {
-            return false
-        }
+        if (!isGamepadSource(event.source)) return false
 
         val deviceId = event.deviceId
+        if (!ensureTracked(deviceId)) return false
+
         val timestamp = currentTimestamp()
         var handled = false
 
-        // Ensure device is tracked.
-        ensureTracked(deviceId)
-
-        // -- Stick axes --------------------------------------------------------
-        for (axis in ButtonMapping.STICK_AXES) {
-            val value = event.getAxisValue(axis)
-            val key = "${deviceId}_${axis}"
-            val prev = previousAxisValues[key] ?: 0f
-            if (abs(value - prev) > AXIS_THRESHOLD) {
-                previousAxisValues[key] = value
-                val w3cAxis = ButtonMapping.axisIndexForMotionAxis(axis)
-                if (w3cAxis != null) {
-                    emitAxisEvent(deviceId, timestamp, w3cAxis, value.toDouble())
-                    handled = true
-                }
-            }
+        for (pos in 0 until event.historySize) {
+            handled = processMotionSample(event, pos, deviceId, timestamp) || handled
         }
-
-        // -- Trigger axes (emit as button events with analog value) ------------
-        for (axis in ButtonMapping.TRIGGER_AXES) {
-            val value = event.getAxisValue(axis)
-            val key = "${deviceId}_${axis}"
-            val prev = previousAxisValues[key] ?: 0f
-            if (abs(value - prev) > AXIS_THRESHOLD) {
-                previousAxisValues[key] = value
-                val buttonIndex = ButtonMapping.triggerButtonIndexForAxis(axis)
-                if (buttonIndex != null) {
-                    val pressed = value > 0.1f
-                    emitButtonEvent(deviceId, timestamp, buttonIndex, pressed, value.toDouble())
-                    handled = true
-                }
-            }
-        }
-
-        // -- Hat axes (D-pad via analog hat, convert to button events) ---------
-        handled = processHatAxes(event, deviceId, timestamp) || handled
+        handled = processMotionSample(event, null, deviceId, timestamp) || handled
 
         return handled
     }
@@ -160,20 +146,20 @@ class GamepadInputManager(
      * Returns `true` if the event was handled.
      */
     fun onKeyEvent(event: KeyEvent): Boolean {
-        if (event.source and (InputDevice.SOURCE_GAMEPAD or InputDevice.SOURCE_JOYSTICK) == 0) {
-            return false
-        }
+        if (!isGamepadSource(event.source)) return false
 
         val buttonIndex = ButtonMapping.buttonIndexForKeyCode(event.keyCode) ?: return false
-        val deviceId = event.deviceId
-        val timestamp = currentTimestamp()
 
-        // Ensure device is tracked.
-        ensureTracked(deviceId)
+        // Consume (but don't re-emit) auto-repeats of a held button; only the
+        // initial down and the final up are forwarded to Dart.
+        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount > 0) return true
+
+        val deviceId = event.deviceId
+        if (!ensureTracked(deviceId)) return false
 
         val pressed = event.action == KeyEvent.ACTION_DOWN
         val value = if (pressed) 1.0 else 0.0
-        emitButtonEvent(deviceId, timestamp, buttonIndex, pressed, value)
+        emitButtonEvent(deviceId, currentTimestamp(), buttonIndex, pressed, value)
 
         return true
     }
@@ -200,22 +186,38 @@ class GamepadInputManager(
     private fun scanConnectedGamepads() {
         for (id in InputDevice.getDeviceIds()) {
             val device = InputDevice.getDevice(id) ?: continue
-            if (isGamepad(device)) {
-                if (trackedDevices.add(id)) {
-                    emitConnectionEvent(device, connected = true)
-                }
-            }
+            if (isGamepad(device)) track(device)
         }
     }
 
-    /** Ensures a device is in the tracked set, emitting a connection event if new. */
-    private fun ensureTracked(deviceId: Int) {
-        if (!trackedDevices.contains(deviceId)) {
-            val device = InputDevice.getDevice(deviceId) ?: return
-            if (isGamepad(device) && trackedDevices.add(deviceId)) {
-                emitConnectionEvent(device, connected = true)
-            }
-        }
+    /** Tracks a gamepad if not yet tracked, caching its info and emitting a connect event. */
+    private fun track(device: InputDevice) {
+        if (!trackedDevices.add(device.id)) return
+        deviceInfoCache[device.id] = DeviceInfo(
+            name = device.name ?: "Unknown",
+            vendorId = device.vendorId,
+            productId = device.productId,
+        )
+        emitConnectionEvent(device, connected = true)
+    }
+
+    /**
+     * Ensures a device is tracked, emitting a connection event if new.
+     * Returns false if the device is unknown or not a gamepad — callers must
+     * not emit input events for such devices.
+     */
+    private fun ensureTracked(deviceId: Int): Boolean {
+        if (trackedDevices.contains(deviceId)) return true
+        val device = InputDevice.getDevice(deviceId) ?: return false
+        if (!isGamepad(device)) return false
+        track(device)
+        return true
+    }
+
+    /** Strict source test: the event comes from a gamepad or joystick. */
+    private fun isGamepadSource(source: Int): Boolean {
+        return (source and InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD ||
+                (source and InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
     }
 
     /** Returns whether the device is a real gamepad or joystick. */
@@ -248,18 +250,85 @@ class GamepadInputManager(
     private fun currentTimestamp(): Long = System.currentTimeMillis()
 
     /**
-     * Processes AXIS_HAT_X and AXIS_HAT_Y from a MotionEvent, converting
-     * discrete hat positions into D-pad button press/release events.
+     * Processes one motion sample (a historical batch position, or the current
+     * sample when [historyPos] is null): stick axes, trigger axes and hat.
      */
-    private fun processHatAxes(
+    private fun processMotionSample(
         event: MotionEvent,
+        historyPos: Int?,
+        deviceId: Int,
+        timestamp: Long,
+    ): Boolean {
+        fun axisValue(axis: Int): Float =
+            if (historyPos == null) event.getAxisValue(axis)
+            else event.getHistoricalAxisValue(axis, historyPos)
+
+        var handled = false
+
+        // -- Stick axes --------------------------------------------------------
+        for (axis in ButtonMapping.STICK_AXES) {
+            var value = axisValue(axis)
+            // Apply the device-reported flat region (deadzone), as recommended
+            // by the Android game-controller guide.
+            if (abs(value) < axisFlat(event, axis)) value = 0f
+            val key = "${deviceId}_${axis}"
+            val prev = previousAxisValues[key] ?: 0f
+            if (abs(value - prev) > AXIS_THRESHOLD) {
+                previousAxisValues[key] = value
+                val w3cAxis = ButtonMapping.axisIndexForMotionAxis(axis)
+                if (w3cAxis != null) {
+                    emitAxisEvent(deviceId, timestamp, w3cAxis, value.toDouble())
+                    handled = true
+                }
+            }
+        }
+
+        // -- Trigger axes (emit as button events with analog value) ------------
+        for (axis in ButtonMapping.TRIGGER_AXES) {
+            val value = axisValue(axis)
+            val key = "${deviceId}_${axis}"
+            val prev = previousAxisValues[key] ?: 0f
+            if (abs(value - prev) > AXIS_THRESHOLD) {
+                previousAxisValues[key] = value
+                val buttonIndex = ButtonMapping.triggerButtonIndexForAxis(axis)
+                if (buttonIndex != null) {
+                    val pressed = value > TRIGGER_PRESS_THRESHOLD
+                    emitButtonEvent(deviceId, timestamp, buttonIndex, pressed, value.toDouble())
+                    handled = true
+                }
+            }
+        }
+
+        // -- Hat axes (D-pad via analog hat, convert to button events) ---------
+        handled = processHatSample(
+            hatX = axisValue(MotionEvent.AXIS_HAT_X),
+            hatY = axisValue(MotionEvent.AXIS_HAT_Y),
+            deviceId = deviceId,
+            timestamp = timestamp,
+        ) || handled
+
+        return handled
+    }
+
+    /** Returns the device-reported flat (deadzone) for an axis, cached per device. */
+    private fun axisFlat(event: MotionEvent, axis: Int): Float {
+        val device = event.device ?: return 0f
+        return axisFlats.getOrPut("${device.id}_${axis}") {
+            device.getMotionRange(axis, event.source)?.flat ?: 0f
+        }
+    }
+
+    /**
+     * Processes AXIS_HAT_X and AXIS_HAT_Y sample values, converting discrete
+     * hat positions into D-pad button press/release events.
+     */
+    private fun processHatSample(
+        hatX: Float,
+        hatY: Float,
         deviceId: Int,
         timestamp: Long,
     ): Boolean {
         var handled = false
-
-        val hatX = event.getAxisValue(MotionEvent.AXIS_HAT_X)
-        val hatY = event.getAxisValue(MotionEvent.AXIS_HAT_Y)
 
         val prevHatX = previousHatX[deviceId] ?: 0f
         val prevHatY = previousHatY[deviceId] ?: 0f
@@ -350,8 +419,17 @@ class GamepadInputManager(
 
     private fun emitDisconnectionEvent(deviceId: Int) {
         val timestamp = currentTimestamp()
+        val info = deviceInfoCache.remove(deviceId)
         // Wire format: [0, gamepadId, timestamp, connected, name, vendorId, productId]
-        streamHandler.send(listOf(0, deviceId, timestamp, false, "Unknown", 0, 0))
+        streamHandler.send(listOf(
+            0,
+            deviceId,
+            timestamp,
+            false,
+            info?.name ?: "Unknown",
+            info?.vendorId ?: 0,
+            info?.productId ?: 0,
+        ))
     }
 
     private fun gamepadInfoMap(device: InputDevice): HashMap<String, Any> {

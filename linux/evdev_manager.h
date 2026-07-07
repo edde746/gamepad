@@ -50,6 +50,9 @@ class EvdevManager {
     dev_t node_dev;
     ino_t node_ino;
     dev_t rdev;
+    // True when the driver reports face buttons by label (xpad), requiring
+    // BTN_NORTH/BTN_WEST to be swapped to match the physical layout.
+    bool swap_north_west;
     struct input_absinfo abs_info[ABS_MAX];
     GSource* io_source;
     // Last emitted axis values for throttling (indexed by W3C axis).

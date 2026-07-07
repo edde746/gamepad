@@ -10,7 +10,7 @@ GamepadStreamHandler::GamepadStreamHandler() = default;
 GamepadStreamHandler::~GamepadStreamHandler() = default;
 
 void GamepadStreamHandler::SendEvent(const flutter::EncodableValue& event) {
-  std::function<void()> wake_callback;
+  std::function<bool()> wake_callback;
   bool should_post = false;
   {
     std::lock_guard<std::mutex> lock(sink_mutex_);
@@ -21,8 +21,14 @@ void GamepadStreamHandler::SendEvent(const flutter::EncodableValue& event) {
     should_post = !flush_posted_.exchange(true);
     wake_callback = wake_callback_;
   }
-  if (should_post && wake_callback) {
-    wake_callback();
+  if (should_post) {
+    const bool posted = wake_callback && wake_callback();
+    if (!posted) {
+      // The platform thread couldn't be woken (e.g. the HWND isn't known
+      // yet). Clear the latch so the next event retries the post; queued
+      // events are also flushed when the HWND is first captured.
+      flush_posted_.store(false);
+    }
   }
 }
 
@@ -41,7 +47,7 @@ void GamepadStreamHandler::FlushQueuedEvents() {
     event_sink_->Success(event);
   }
 
-  std::function<void()> wake_callback;
+  std::function<bool()> wake_callback;
   bool should_post = false;
   {
     std::lock_guard<std::mutex> lock(sink_mutex_);
@@ -50,8 +56,11 @@ void GamepadStreamHandler::FlushQueuedEvents() {
       wake_callback = wake_callback_;
     }
   }
-  if (should_post && wake_callback) {
-    wake_callback();
+  if (should_post) {
+    const bool posted = wake_callback && wake_callback();
+    if (!posted) {
+      flush_posted_.store(false);
+    }
   }
 }
 
@@ -60,7 +69,7 @@ bool GamepadStreamHandler::HasListener() const {
   return event_sink_ != nullptr;
 }
 
-void GamepadStreamHandler::SetWakeCallback(std::function<void()> callback) {
+void GamepadStreamHandler::SetWakeCallback(std::function<bool()> callback) {
   std::lock_guard<std::mutex> lock(sink_mutex_);
   wake_callback_ = std::move(callback);
 }

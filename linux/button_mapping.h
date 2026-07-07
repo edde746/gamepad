@@ -50,7 +50,14 @@ constexpr int kRightStickY = 3;
 
 /// Maps an evdev button code to its W3C Standard Gamepad button index.
 /// Returns -1 if the button has no standard mapping.
-int EvdevButtonToW3C(uint16_t code);
+///
+/// `swap_north_west` handles drivers (notably xpad) that report face buttons
+/// by label rather than by location: xpad emits BTN_X (== BTN_NORTH) for the
+/// physical left/X button and BTN_Y (== BTN_WEST) for the physical top/Y
+/// button, the opposite of the Linux gamepad spec that hid-playstation and
+/// others follow. When true, BTN_NORTH/BTN_WEST are swapped so the W3C
+/// indices match the physical layout.
+int EvdevButtonToW3C(uint16_t code, bool swap_north_west = false);
 
 /// Maps an evdev absolute axis code to its W3C Standard Gamepad axis index.
 /// Returns -1 if the axis is a trigger or hat (those are treated as buttons).

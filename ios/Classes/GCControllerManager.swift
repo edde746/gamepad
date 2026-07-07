@@ -85,17 +85,12 @@ class GCControllerManager {
             let key = ObjectIdentifier(controller)
             guard let gamepadId = controllerIds[key] else { continue }
 
-            var info: [String: Any] = [
+            // GCController exposes no numeric vendor/product IDs through the
+            // public API, so those keys are omitted (optional on the Dart side).
+            let info: [String: Any] = [
                 "id": gamepadId,
                 "name": controllerName(controller),
             ]
-
-            if let vendorId = vendorId(for: controller) {
-                info["vendorId"] = vendorId
-            }
-            if let productId = productId(for: controller) {
-                info["productId"] = productId
-            }
 
             result.append(info)
         }
@@ -105,20 +100,27 @@ class GCControllerManager {
     // MARK: - Connection events
 
     private func controllerDidConnect(_ controller: GCController) {
+        let key = ObjectIdentifier(controller)
+        // Guard against duplicate connection notifications (e.g. on
+        // reconnect/reconfigure paths the system can re-post connect for a
+        // controller we already track).
+        guard controllerIds[key] == nil else { return }
+
         let gamepadId = assignId(for: controller)
 
         // Register input handlers for the extended gamepad profile.
         registerInputHandlers(for: controller, gamepadId: gamepadId)
 
         // Wire format: [0, gamepadId, timestamp, connected, name, vendorId, productId]
+        // vendor/product IDs are not publicly exposed by GCController; send null.
         let event: [Any] = [
             0,
             gamepadId,
             currentTimestamp(),
             true,
             controllerName(controller),
-            vendorId(for: controller) as Any,
-            productId(for: controller) as Any,
+            NSNull(),
+            NSNull(),
         ]
         streamHandler.send(event: event)
     }
@@ -136,8 +138,8 @@ class GCControllerManager {
             currentTimestamp(),
             false,
             controllerName(controller),
-            vendorId(for: controller) as Any,
-            productId(for: controller) as Any,
+            NSNull(),
+            NSNull(),
         ]
         streamHandler.send(event: event)
     }
@@ -211,30 +213,15 @@ class GCControllerManager {
         return id
     }
 
+    /// Human-readable controller name. Prefers the vendor name and falls
+    /// back to the product category, matching the macOS implementation so a
+    /// given controller reports the same name on both platforms.
     private func controllerName(_ controller: GCController) -> String {
-        let category = controller.productCategory
-        if !category.isEmpty {
-            return category
+        if let vendorName = controller.vendorName, !vendorName.isEmpty {
+            return vendorName
         }
-        return controller.vendorName ?? "Unknown Controller"
-    }
-
-    /// Returns the USB vendor ID for the controller, if available.
-    ///
-    /// GCController does not directly expose numeric vendor/product IDs
-    /// through the public API. We attempt to obtain them from the
-    /// underlying physical device description on iOS 16+.
-    private func vendorId(for controller: GCController) -> Int? {
-        // GCController does not publicly expose numeric vendor IDs on iOS.
-        // Return nil; the Dart side treats this as optional.
-        return nil
-    }
-
-    /// Returns the USB product ID for the controller, if available.
-    private func productId(for controller: GCController) -> Int? {
-        // GCController does not publicly expose numeric product IDs on iOS.
-        // Return nil; the Dart side treats this as optional.
-        return nil
+        let category = controller.productCategory
+        return category.isEmpty ? "Unknown Controller" : category
     }
 
     /// Returns the current timestamp in milliseconds since epoch.

@@ -2,16 +2,16 @@
 
 namespace ButtonMapping {
 
-int EvdevButtonToW3C(uint16_t code) {
+int EvdevButtonToW3C(uint16_t code, bool swap_north_west) {
   switch (code) {
     case BTN_SOUTH:
       return kButtonA;
     case BTN_EAST:
       return kButtonB;
     case BTN_WEST:
-      return kButtonX;
+      return swap_north_west ? kButtonY : kButtonX;
     case BTN_NORTH:
-      return kButtonY;
+      return swap_north_west ? kButtonX : kButtonY;
     case BTN_TL:
       return kLeftShoulder;
     case BTN_TR:
