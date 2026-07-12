@@ -12,6 +12,7 @@
 - **iOS/macOS**: gamepad names now use the same precedence on both platforms (`vendorName`, then `productCategory`); events already on the main thread are delivered without an extra runloop hop and can no longer hit a cancelled sink.
 - Removed the unconditional `dart:io` import from the shared Dart code.
 - Podspec versions now track the package version.
+- **iOS/macOS**: add Swift Package Manager support while retaining CocoaPods compatibility.
 
 ## 1.5.7
 

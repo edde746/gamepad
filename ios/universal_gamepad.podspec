@@ -15,7 +15,7 @@ GameController framework on iOS.
   s.tvos.deployment_target = '14.0'
   s.swift_version    = '5.0'
 
-  s.source_files     = 'Classes/**/*'
+  s.source_files     = 'universal_gamepad/Sources/universal_gamepad/**/*'
 
   s.dependency 'Flutter'
 

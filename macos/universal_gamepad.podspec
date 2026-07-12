@@ -14,7 +14,7 @@ Pod::Spec.new do |s|
   s.platform         = :osx, '11.0'
   s.osx.deployment_target = '11.0'
 
-  s.source_files     = 'Classes/**/*'
+  s.source_files     = 'universal_gamepad/Sources/universal_gamepad/**/*'
   s.dependency 'FlutterMacOS'
 
   s.framework        = 'GameController'
